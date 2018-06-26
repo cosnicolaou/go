@@ -2,17 +2,12 @@ package main
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
-	"net"
-	"net/smtp"
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -43,7 +38,7 @@ var (
 	configFileFlag    string
 	verboseFlag       bool
 	timestampFileFlag string
-	globalConfig      *configuration
+	globalConfig      internal.Configuration
 )
 
 func init() {
@@ -53,89 +48,7 @@ func init() {
 	hostname, _ = os.Hostname()
 }
 
-type configuration struct {
-	// SMTP configuration for alert emails.
-	Server  string   `json:"smtp_server"`
-	Port    string   `json:"smtp_port"`
-	User    string   `json:"smtp_user"`
-	Passwd  string   `json:"smtp_password"`
-	To      []string `json:"smtp_to"`
-	From    string   `json:"smtp_from"`
-	Subject string   `json:"smtp_subject"`
-
-	// Alert configuation, if more than AlertPulses are counted
-	// over AlertInterval then an email is sent.
-	AlertInterval string `json:"alert_interval"`
-	AlertPulses   int64  `json:"alert_pulses"`
-
-	// Number of gallons per pulse.
-	GallonsPerPulse int `json:"gallons_per_pulse"`
-
-	// Record the time of each pulse in binary, little endian, 64 bit unix
-	// nanoseconds.
-	PulseTimestampFile string `json:"pulse_timestamps_file"`
-
-	// Parsed and processed configuration information.
-
-	// AlertInterval as a time.Duration.
-	alertDuration time.Duration
-}
-
-type smtpState struct {
-	auth                smtp.Auth
-	to                  []string
-	host, from, subject string
-}
-
-func (ss *smtpState) send(body string) error {
-	if ss == nil || ss.auth == nil {
-		return nil
-	}
-	msg := fmt.Sprintf("To: %v\r\nSubject: %v\r\n\r\n%v\r\nHost: %v\r\n",
-		ss.to, ss.subject, body, hostname)
-	err := smtp.SendMail(ss.host, ss.auth, ss.from, ss.to, []byte(msg))
-	if err != nil {
-		err = fmt.Errorf("smtp.SendMail failed: %v, from: %v, to: %v", ss.host, ss.from, ss.to, err)
-	}
-	return err
-}
-
-func configureEmail() (*smtpState, error) {
-	state := &smtpState{
-		host:    net.JoinHostPort(globalConfig.Server, globalConfig.Port),
-		to:      globalConfig.To,
-		from:    globalConfig.From,
-		subject: globalConfig.Subject,
-	}
-	if len(state.host) == 0 {
-		return nil, nil
-	}
-	state.auth = smtp.PlainAuth("", globalConfig.User, globalConfig.Passwd, globalConfig.Server)
-	err := state.send(fmt.Sprintf("%v started on %v @ %v\n", os.Args[0], hostname, time.Now()))
-	if err != nil {
-		return nil, err
-	}
-	fmt.Printf("sent hello email to %v\n", strings.Join(state.to, ","))
-	return state, nil
-}
-
-func readConfig(filename string) error {
-	buf, err := ioutil.ReadFile(filename)
-	if err != nil {
-		return fmt.Errorf("failed to read: %v", filename)
-	}
-	if err := json.Unmarshal(buf, &globalConfig); err != nil {
-		return fmt.Errorf("failed to unmarshal %v: %v", filename, err)
-	}
-	interval, err := time.ParseDuration(globalConfig.AlertInterval)
-	if err != nil {
-		return fmt.Errorf("failed to parse %v as time.Duration: %v", globalConfig.AlertInterval, err)
-	}
-	globalConfig.alertDuration = interval
-	return nil
-}
-
-func openTimestampsFile(filename, owner string) (io.WriteCloser, error) {
+func openTimestampsFile(filename string) (io.WriteCloser, error) {
 	timestampWriter, err := os.OpenFile(filename, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open %v: %v", filename, err)
@@ -153,21 +66,20 @@ func main() {
 		return
 	}
 
-	if err := readConfig(configFileFlag); err != nil {
+	if err := internal.ReadConfig(configFileFlag, &globalConfig); err != nil {
 		panic(err)
 	}
 
-	smtpState, err := configureEmail()
+	smtpClient, err := globalConfig.ConfigureEmail(true)
 	if err != nil {
 		panic(err)
 	}
-	if smtpState == nil {
+	if smtpClient == nil {
 		fmt.Printf("email alerts are not configured")
 	}
 
 	timestampWriter, err := openTimestampsFile(
-		globalConfig.PulseTimestampFile,
-		globalConfig.PulseTimestampUser)
+		globalConfig.PulseTimestampFile)
 	if err != nil {
 		panic(err)
 	}
@@ -191,10 +103,10 @@ func main() {
 
 	// Generate alerts if a certain number of pulses per time period
 	// are counted.
-	go alert(globalConfig.alertDuration,
+	go alert(globalConfig.AlertDuration,
 		globalConfig.AlertPulses,
 		int64(globalConfig.GallonsPerPulse),
-		smtpState)
+		smtpClient)
 
 	go poll(pfd, pulseMeterPin, pulseTimes)
 
@@ -251,7 +163,7 @@ func console(pfd *piface.PiFaceDigital, timestampFile io.Writer, pulseTimes <-ch
 	}
 }
 
-func alert(interval time.Duration, pulses int64, gallonsPerPulse int64, ss *smtpState) {
+func alert(interval time.Duration, pulses int64, gallonsPerPulse int64, smtp *internal.SMTPClient) {
 	last := atomic.LoadInt64(&pulseCounter)
 	for {
 		time.Sleep(interval)
@@ -259,7 +171,7 @@ func alert(interval time.Duration, pulses int64, gallonsPerPulse int64, ss *smtp
 		if seen := cur - last; seen > pulses {
 			msg := fmt.Sprintf("ALERT: %v gallons over %v: %v\n", seen*gallonsPerPulse, interval, time.Now())
 			os.Stdout.WriteString(msg)
-			ss.send(msg)
+			smtp.Send(msg)
 		}
 		last = cur
 	}
