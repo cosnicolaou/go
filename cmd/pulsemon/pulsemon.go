@@ -110,6 +110,8 @@ func main() {
 
 	go poll(pfd, pulseMeterPin, pulseTimes)
 
+	go daily(globalConfig.StatusTime, int64(globalConfig.GallonsPerPulse), smtpClient)
+
 	<-sigch
 	fmt.Printf("closing %v\n", globalConfig.PulseTimestampFile)
 	timestampWriter.Close()
@@ -201,5 +203,19 @@ func poll(pfd *piface.PiFaceDigital, pin int, pulseTimes chan<- time.Time) {
 			atomic.AddInt64(&pulseCounter, 1)
 			pulseTimes <- time.Now()
 		}
+	}
+}
+
+func daily(hhmm time.Time, gallonsPerPulse int64, smtp *internal.SMTPClient) {
+	for {
+		duration := internal.UntilHHMM(hhmm)
+		prev := atomic.LoadInt64(&pulseCounter)
+		<-time.After(duration)
+		// send email
+		cur := atomic.LoadInt64(&pulseCounter)
+		seen := cur - prev
+		msg := fmt.Sprintf("ALERT: %v gallons over %v: %v\n", seen*gallonsPerPulse, duration, time.Now())
+		smtp.Send(msg)
+		prev = cur
 	}
 }

@@ -28,6 +28,9 @@ type Configuration struct {
 	From    string   `json:"smtp_from"`
 	Subject string   `json:"smtp_subject"`
 
+	// Set the time of day to send a status email at in HH:MM format.
+	StatusEmailTime string `json:"status_email_time"`
+
 	// Alert configuation, if more than AlertPulses are counted
 	// over AlertInterval then an email is sent.
 	AlertInterval string `json:"alert_interval"`
@@ -42,8 +45,11 @@ type Configuration struct {
 
 	// Parsed and processed configuration information.
 
-	// AlertInterval as a time.Duration calculated from AlertInterval
+	// AlertInterval as a time.Duration.
 	AlertDuration time.Duration
+
+	// StatusEmailTime as a time.Time.
+	StatusTime time.Time
 }
 
 // ReadConfig reads the configuration from the specified file.
@@ -59,6 +65,13 @@ func ReadConfig(filename string, config *Configuration) error {
 	if err != nil {
 		return fmt.Errorf("failed to parse %v as time.Duration: %v", config.AlertInterval, err)
 	}
+
+	emailAt, err := time.Parse("15:04", config.StatusEmailTime)
+	if err != nil {
+		return fmt.Errorf("failed to parse %v in 15:04 format", config.StatusEmailTime)
+	}
+
+	config.StatusTime = emailAt
 	config.AlertDuration = interval
 	return nil
 }
