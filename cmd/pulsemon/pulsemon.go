@@ -1,10 +1,8 @@
 package main
 
 import (
-	"encoding/binary"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/signal"
 	"strconv"
@@ -23,7 +21,6 @@ const (
 	pulseLEDPin      = 7
 	debounceDuration = 100 * time.Millisecond
 	debounceCount    = int(debounceDuration / pollingInterval)
-	numTimes         = 64 * 1024 // 64K timestamps.
 )
 
 var (
@@ -48,14 +45,6 @@ func init() {
 	hostname, _ = os.Hostname()
 }
 
-func openTimestampsFile(filename string) (io.WriteCloser, error) {
-	timestampWriter, err := os.OpenFile(filename, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0600)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open %v: %v", filename, err)
-	}
-	return timestampWriter, nil
-}
-
 func main() {
 	flag.Parse()
 
@@ -78,7 +67,7 @@ func main() {
 		fmt.Printf("email alerts are not configured")
 	}
 
-	timestampWriter, err := openTimestampsFile(
+	timestampWriter, err := internal.NewTimestampFileWriter(
 		globalConfig.PulseTimestampFile)
 	if err != nil {
 		panic(err)
@@ -98,18 +87,22 @@ func main() {
 		return
 	}
 
-	// Log to console and append to the state file.
-	go console(pfd, timestampWriter, pulseTimes)
+	// Log to console and append to the timestamp file.
+	go console(pfd, timestampWriter, smtpClient, pulseTimes)
 
-	// Generate alerts if a certain number of pulses per time period
+	// Generate an alert if a certain number of pulses per time period
 	// are counted.
 	go alert(globalConfig.AlertDuration,
 		globalConfig.AlertPulses,
 		int64(globalConfig.GallonsPerPulse),
 		smtpClient)
 
+	// Poll for pulses.
 	go poll(pfd, pulseMeterPin, pulseTimes)
 
+	go forward(pfd, 100*time.Millisecond, 0, 400*time.Millisecond)
+
+	// Send a daily email.
 	go daily(globalConfig.StatusTime, int64(globalConfig.GallonsPerPulse), smtpClient)
 
 	<-sigch
@@ -117,10 +110,12 @@ func main() {
 	timestampWriter.Close()
 }
 
-func console(pfd *piface.PiFaceDigital, timestampFile io.Writer, pulseTimes <-chan time.Time) {
+func console(pfd *piface.PiFaceDigital,
+	timestampFile *internal.TimestampFileWriter,
+	smtp *internal.SMTPClient,
+	pulseTimes <-chan time.Time) {
 	var prev, cur int64
 	storage := make([]byte, 0, 128)
-	nano := make([]byte, 8)
 	buf := storage[:0]
 	pfd.Leds[4].SetValue(0)
 	pfd.Leds[5].SetValue(0)
@@ -148,9 +143,10 @@ func console(pfd *piface.PiFaceDigital, timestampFile io.Writer, pulseTimes <-ch
 				// drain all event times.
 				select {
 				case event := <-pulseTimes:
-					binary.LittleEndian.PutUint64(nano, uint64(event.UnixNano()))
-					if _, err := timestampFile.Write(nano); err != nil {
-						fmt.Fprintf(os.Stderr, "failed writing/appending to timestamp file: %v", err)
+					if err := timestampFile.Append(event); err != nil {
+						msg := fmt.Sprintf("ERROR appending to timestamp file: %v", err)
+						fmt.Fprintf(os.Stderr, "%s\n", msg)
+						smtp.Send(msg)
 					}
 					n++
 				default:
@@ -203,6 +199,24 @@ func poll(pfd *piface.PiFaceDigital, pin int, pulseTimes chan<- time.Time) {
 			atomic.AddInt64(&pulseCounter, 1)
 			pulseTimes <- time.Now()
 		}
+	}
+}
+
+func forward(pfd *piface.PiFaceDigital, interval time.Duration, relayPin int, relayHold time.Duration) {
+	pfd.Relays[relayPin].AllOff()
+	last := atomic.LoadInt64(&pulseCounter)
+	for {
+		time.Sleep(interval)
+		cur := atomic.LoadInt64(&pulseCounter)
+		if seen := cur - last; seen > 0 {
+			fmt.Fprintf(os.Stderr, "Forwarding %v pulses\n", seen)
+			for i := int64(0); i < seen; i++ {
+				pfd.Relays[relayPin].AllOn()
+				time.Sleep(relayHold)
+				pfd.Relays[relayPin].AllOff()
+			}
+		}
+		last = cur
 	}
 }
 
