@@ -69,10 +69,16 @@ func (ts *TimestampFileScanner) Time() time.Time {
 }
 
 // ReadTimestamps read and print the timestamps.
-func ReadTimestamps(filename string) error {
-	rd, err := os.Open(filename)
-	if err != nil {
-		return err
+func ReadTimestamps(filename string, from, to time.Time) error {
+	var rd *os.File
+	var err error
+	if filename == "-" {
+		rd = os.Stdin
+	} else {
+		rd, err = os.Open(filename)
+		if err != nil {
+			return err
+		}
 	}
 	defer rd.Close()
 	pulseCounter := 0
@@ -81,6 +87,9 @@ func ReadTimestamps(filename string) error {
 	for sc.Scan() {
 		pulseCounter++
 		ns := sc.Time()
+		if from.After(ns) || to.Before(ns) {
+			continue
+		}
 		fmt.Printf("%v\t%v\t%v\n", pulseCounter, ns.UnixNano(), ns)
 	}
 	return sc.Err()

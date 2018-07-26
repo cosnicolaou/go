@@ -15,14 +15,6 @@ import (
 	"github.com/luismesas/goPi/spi"
 )
 
-const (
-	pollingInterval  = 10 * time.Millisecond
-	pulseMeterPin    = 0
-	pulseLEDPin      = 7
-	debounceDuration = 100 * time.Millisecond
-	debounceCount    = int(debounceDuration / pollingInterval)
-)
-
 var (
 	// number of pulses since start.
 	pulseCounter int64
@@ -41,23 +33,24 @@ var (
 func init() {
 	flag.StringVar(&configFileFlag, "config", "", "configuration file in JSON format")
 	flag.BoolVar(&verboseFlag, "verbose", false, "output debug/trace information to the console")
-	flag.StringVar(&timestampFileFlag, "read-timestamp-file", "", "if set, read and print the contents of the specified timestamps file and exit")
 	hostname, _ = os.Hostname()
 }
 
 func main() {
 	flag.Parse()
-
-	if len(timestampFileFlag) > 0 {
-		if err := internal.ReadTimestamps(timestampFileFlag); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to read or parse: %v: %v", timestampFileFlag, err)
-		}
-		return
-	}
-
 	if err := internal.ReadConfig(configFileFlag, &globalConfig); err != nil {
 		panic(err)
 	}
+
+	pollingInterval := time.Duration(globalConfig.PollingInterval) * time.Millisecond
+	pulseMeterPin := globalConfig.InputPin
+	debounceDuration := time.Duration(globalConfig.InputDebouceMS) * time.Millisecond
+	relayPin := globalConfig.OutputRelayPin
+	relayHold := time.Duration(globalConfig.OutputRelayHoldMS) * time.Millisecond
+	switchPin := globalConfig.OutputPin
+	switchHold := time.Duration(globalConfig.OutputPinHoldMS) * time.Millisecond
+
+	debounceCount := int(debounceDuration / pollingInterval)
 
 	smtpClient, err := globalConfig.ConfigureEmail(true)
 	if err != nil {
@@ -97,10 +90,18 @@ func main() {
 		int64(globalConfig.GallonsPerPulse),
 		smtpClient)
 
-	// Poll for pulses.
-	go poll(pfd, pulseMeterPin, pulseTimes)
+	go idle(globalConfig.IdleAlertDuration, smtpClient)
 
-	go forward(pfd, 100*time.Millisecond, 0, 400*time.Millisecond)
+	// Poll for pulses.
+	go poll(pfd, pulseMeterPin, pollingInterval, debounceCount, pulseTimes)
+
+	if relayPin >= 0 {
+		go forwardRelay(pfd, 100*time.Millisecond, relayPin, relayHold)
+	}
+
+	if switchPin >= 0 {
+		go forwardSwitch(pfd, 100*time.Millisecond, switchPin, switchHold)
+	}
 
 	// Send a daily email.
 	go daily(globalConfig.StatusTime, int64(globalConfig.GallonsPerPulse), smtpClient)
@@ -120,7 +121,6 @@ func console(pfd *piface.PiFaceDigital,
 	pfd.Leds[4].SetValue(0)
 	pfd.Leds[5].SetValue(0)
 	pfd.Leds[6].SetValue(0)
-	pfd.Leds[7].SetValue(0)
 
 	for {
 		time.Sleep(500 * time.Millisecond)
@@ -146,7 +146,7 @@ func console(pfd *piface.PiFaceDigital,
 					if err := timestampFile.Append(event); err != nil {
 						msg := fmt.Sprintf("ERROR appending to timestamp file: %v", err)
 						fmt.Fprintf(os.Stderr, "%s\n", msg)
-						smtp.Send(msg)
+						smtp.Alert(msg)
 					}
 					n++
 				default:
@@ -169,17 +169,31 @@ func alert(interval time.Duration, pulses int64, gallonsPerPulse int64, smtp *in
 		if seen := cur - last; seen > pulses {
 			msg := fmt.Sprintf("ALERT: %v gallons over %v: %v\n", seen*gallonsPerPulse, interval, time.Now())
 			os.Stdout.WriteString(msg)
-			smtp.Send(msg)
+			smtp.Alert(msg)
 		}
 		last = cur
 	}
 }
 
-func poll(pfd *piface.PiFaceDigital, pin int, pulseTimes chan<- time.Time) {
-	fmt.Printf("polling pin %v\n", pin)
+func idle(interval time.Duration, smtp *internal.SMTPClient) {
+	last := atomic.LoadInt64(&pulseCounter)
+	for {
+		time.Sleep(interval)
+		cur := atomic.LoadInt64(&pulseCounter)
+		if seen := cur - last; seen == 0 {
+			msg := fmt.Sprintf("ALERT: no water flow for %v: %v\n", interval, time.Now())
+			os.Stdout.WriteString(msg)
+			smtp.Alert(msg)
+		}
+		last = cur
+	}
+}
+
+func poll(pfd *piface.PiFaceDigital, pin int, interval time.Duration, debounceCount int, pulseTimes chan<- time.Time) {
+	fmt.Printf("Polling pin %v\n", pin)
 	count := debounceCount
 	for {
-		time.Sleep(pollingInterval)
+		time.Sleep(interval)
 		val := pfd.InputPins[pin].Value()
 		if val == 0 {
 			// Circuit is open.
@@ -202,14 +216,15 @@ func poll(pfd *piface.PiFaceDigital, pin int, pulseTimes chan<- time.Time) {
 	}
 }
 
-func forward(pfd *piface.PiFaceDigital, interval time.Duration, relayPin int, relayHold time.Duration) {
+func forwardRelay(pfd *piface.PiFaceDigital, interval time.Duration, relayPin int, relayHold time.Duration) {
+	fmt.Printf("Relay pin %v\n", relayPin)
 	pfd.Relays[relayPin].AllOff()
 	last := atomic.LoadInt64(&pulseCounter)
 	for {
 		time.Sleep(interval)
 		cur := atomic.LoadInt64(&pulseCounter)
 		if seen := cur - last; seen > 0 {
-			fmt.Fprintf(os.Stderr, "Forwarding %v pulses\n", seen)
+			fmt.Fprintf(os.Stderr, "Forwarding %v pulses via a relay\n", seen)
 			for i := int64(0); i < seen; i++ {
 				pfd.Relays[relayPin].AllOn()
 				time.Sleep(relayHold)
@@ -220,16 +235,35 @@ func forward(pfd *piface.PiFaceDigital, interval time.Duration, relayPin int, re
 	}
 }
 
+func forwardSwitch(pfd *piface.PiFaceDigital, interval time.Duration, outputPin int, outputHold time.Duration) {
+	fmt.Printf("Output pin %v\n", outputPin)
+	pfd.OutputPins[outputPin].AllOff()
+	last := atomic.LoadInt64(&pulseCounter)
+	for {
+		time.Sleep(interval)
+		cur := atomic.LoadInt64(&pulseCounter)
+		if seen := cur - last; seen > 0 {
+			fmt.Fprintf(os.Stderr, "Forwarding %v pulses via cmos output\n", seen)
+			for i := int64(0); i < seen; i++ {
+				pfd.OutputPins[outputPin].AllOn()
+				time.Sleep(outputHold)
+				pfd.OutputPins[outputPin].AllOff()
+			}
+		}
+		last = cur
+	}
+}
+
 func daily(hhmm time.Time, gallonsPerPulse int64, smtp *internal.SMTPClient) {
+	prev := atomic.LoadInt64(&pulseCounter)
 	for {
 		duration := internal.UntilHHMM(hhmm)
-		prev := atomic.LoadInt64(&pulseCounter)
 		<-time.After(duration)
 		// send email
 		cur := atomic.LoadInt64(&pulseCounter)
 		seen := cur - prev
-		msg := fmt.Sprintf("ALERT: %v gallons over %v: %v\n", seen*gallonsPerPulse, duration, time.Now())
-		smtp.Send(msg)
+		msg := fmt.Sprintf("DAILY USAGE: %v gallons over %v: %v\n", seen*gallonsPerPulse, duration, time.Now())
+		smtp.Status(msg)
 		prev = cur
 	}
 }
