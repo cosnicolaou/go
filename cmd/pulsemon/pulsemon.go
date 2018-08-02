@@ -50,8 +50,6 @@ func main() {
 	switchPin := globalConfig.OutputPin
 	switchHold := time.Duration(globalConfig.OutputPinHoldMS) * time.Millisecond
 
-	debounceCount := int(debounceDuration / pollingInterval)
-
 	smtpClient, err := globalConfig.ConfigureEmail(true)
 	if err != nil {
 		panic(err)
@@ -93,7 +91,7 @@ func main() {
 	go idle(globalConfig.IdleAlertDuration, smtpClient)
 
 	// Poll for pulses.
-	go poll(pfd, pulseMeterPin, pollingInterval, debounceCount, pulseTimes)
+	go poll(pfd, pulseMeterPin, pollingInterval, debounceDuration, pulseTimes)
 
 	if relayPin >= 0 {
 		go forwardRelay(pfd, 100*time.Millisecond, relayPin, relayHold)
@@ -189,8 +187,9 @@ func idle(interval time.Duration, smtp *internal.SMTPClient) {
 	}
 }
 
-func poll(pfd *piface.PiFaceDigital, pin int, interval time.Duration, debounceCount int, pulseTimes chan<- time.Time) {
-	fmt.Printf("Polling pin %v\n", pin)
+func poll(pfd *piface.PiFaceDigital, pin int, interval, debounce time.Duration, pulseTimes chan<- time.Time) {
+	fmt.Printf("Polling pin %v, interval %v, debounce duration %v\n", pin, interval, debounce)
+	debounceCount := int(debounce / interval)
 	count := debounceCount
 	for {
 		time.Sleep(interval)
@@ -224,7 +223,9 @@ func forwardRelay(pfd *piface.PiFaceDigital, interval time.Duration, relayPin in
 		time.Sleep(interval)
 		cur := atomic.LoadInt64(&pulseCounter)
 		if seen := cur - last; seen > 0 {
-			fmt.Fprintf(os.Stderr, "Forwarding %v pulses via a relay\n", seen)
+			if verboseFlag {
+				fmt.Fprintf(os.Stderr, "Forwarding %v pulses via a relay\n", seen)
+			}
 			for i := int64(0); i < seen; i++ {
 				pfd.Relays[relayPin].AllOn()
 				time.Sleep(relayHold)
@@ -243,7 +244,9 @@ func forwardSwitch(pfd *piface.PiFaceDigital, interval time.Duration, outputPin 
 		time.Sleep(interval)
 		cur := atomic.LoadInt64(&pulseCounter)
 		if seen := cur - last; seen > 0 {
-			fmt.Fprintf(os.Stderr, "Forwarding %v pulses via cmos output\n", seen)
+			if verboseFlag {
+				fmt.Fprintf(os.Stderr, "Forwarding %v pulses via cmos output\n", seen)
+			}
 			for i := int64(0); i < seen; i++ {
 				pfd.OutputPins[outputPin].AllOn()
 				time.Sleep(outputHold)

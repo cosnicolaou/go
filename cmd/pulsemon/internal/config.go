@@ -61,7 +61,7 @@ type Configuration struct {
 	// Hardware specific configuration, doesn't really belong here. Set to
 	// -1 to disable.
 	InputPin          int `json:"input_pin"`
-	InputDebouceMS    int `json:"input_debouce_ms"`
+	InputDebouceMS    int `json:"input_debounce_ms"`
 	OutputRelayPin    int `json:"relay_pin"`
 	OutputRelayHoldMS int `json:"relay_hold_ms"`
 	OutputPin         int `json:"output_pin"`
