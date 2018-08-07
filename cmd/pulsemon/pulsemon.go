@@ -153,7 +153,7 @@ func console(pfd *piface.PiFaceDigital,
 			}
 		drained:
 			if verboseFlag {
-				fmt.Fprintf(os.Stderr, "drained %v pulse timestamps", n)
+				fmt.Fprintf(os.Stderr, "drained %v pulse timestamps\n", n)
 			}
 		}
 	}
