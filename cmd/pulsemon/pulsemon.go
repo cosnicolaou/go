@@ -44,7 +44,7 @@ func main() {
 
 	pollingInterval := time.Duration(globalConfig.PollingInterval) * time.Millisecond
 	pulseMeterPin := globalConfig.InputPin
-	debounceDuration := time.Duration(globalConfig.InputDebouceMS) * time.Millisecond
+	debounceDuration := time.Duration(globalConfig.InputDebounceMS) * time.Millisecond
 	relayPin := globalConfig.OutputRelayPin
 	relayHold := time.Duration(globalConfig.OutputRelayHoldMS) * time.Millisecond
 	switchPin := globalConfig.OutputPin

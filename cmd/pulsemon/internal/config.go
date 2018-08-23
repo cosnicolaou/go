@@ -61,7 +61,7 @@ type Configuration struct {
 	// Hardware specific configuration, doesn't really belong here. Set to
 	// -1 to disable.
 	InputPin          int `json:"input_pin"`
-	InputDebouceMS    int `json:"input_debounce_ms"`
+	InputDebounceMS   int `json:"input_debounce_ms"`
 	OutputRelayPin    int `json:"relay_pin"`
 	OutputRelayHoldMS int `json:"relay_hold_ms"`
 	OutputPin         int `json:"output_pin"`
@@ -109,7 +109,7 @@ func (sc *SMTPClient) String() string {
 	return fmt.Sprintf("%v: from %v, to %v, alert subject: %v, status subject %v", sc.host, sc.from, strings.Join(sc.to, ","), sc.alertSubject, sc.statusSubject)
 }
 
-// ConfigurEmail configures and optional tests an smtp email client by sending
+// ConfigureEmail configures and optional tests an smtp email client by sending
 // a 'hello' message.
 func (config *Configuration) ConfigureEmail(sendHello bool) (*SMTPClient, error) {
 	client := &SMTPClient{
@@ -131,14 +131,17 @@ func (config *Configuration) ConfigureEmail(sendHello bool) (*SMTPClient, error)
 	return client, nil
 }
 
+// Alert sends an alert email.
 func (sc *SMTPClient) Alert(body string) error {
 	return sc.Send(sc.alertSubject, body)
 }
 
+// Status sends a status email.
 func (sc *SMTPClient) Status(body string) error {
 	return sc.Send(sc.statusSubject, body)
 }
 
+// Send sends a generic email.
 func (sc *SMTPClient) Send(subject, body string) error {
 	if sc == nil || sc.auth == nil {
 		return nil
